@@ -1,0 +1,425 @@
+// This script is developed by @Ahmed Mutasim Abdalla Mahmoud as part of his PhD at the University of Nottingham
+// for Monitoring Sand Dune Movement using Remote Sesning and GEE //
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Define the study area
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+var Study_Area = ee.FeatureCollection('projects/ee-ahmedmahmoud/assets/shapefiles/Study_Area');
+Study_Area = Study_Area.geometry();
+Map.centerObject(Study_Area);
+Map.addLayer(Study_Area, {color: 'yellow'}, 'Study_Area');
+////////////////////////////////////////////////////////////////////////////////////////////////////
+//Collect the Sentinel 2 Multi spectral instrument L2A images between December 2018 to December 2021
+////////////////////////////////////////////////////////////////////////////////////////////////////
+var SenImageCollection = ee.ImageCollection("COPERNICUS/S2_SR")
+                    .filterBounds(rio)
+                    .filterDate('2018-12-01', '2021-12-31')
+                    .select('B[1-8]')
+                    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',1))
+                    .map(function(image){return image.clip(Study_Area)});
+print('SenImageCollection', SenImageCollection); 
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+// Image Visualizing
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Visualzation of a single image
+var listOfimages = SenImageCollection.toList(SenImageCollection.size());
+Map.addLayer(ee.Image(listOfimages.get(0)), {bands: ['B8', 'B3', 'B2'], min: 0, max: 3000});
+Map.addLayer(ee.Image(listOfimages.get(70)), {bands: ['B8', 'B3', 'B2'], min: 0, max: 3000});
+Map.addLayer(ee.Image(listOfimages.get(100)), {bands: ['B8', 'B3', 'B2'], min: 0, max: 3000});
+// Visualization of all the images 
+// var listOfimages = SenImageCollection.toList(SenImageCollection.size());
+// var len = listOfimages.size();
+// len.evaluate(function(l) {
+//   for (var i=0; i < l; i++) {
+//     var image = ee.Image(listOfimages.get(i));
+//     Map.addLayer(image, {bands: ['B4', 'B3', 'B2'], min: 0.0, max: 0.3}, 'image-'+i.toString());
+//   } 
+// });
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+// Get the list of the image acquisition dates
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+var ImageDates = SenImageCollection.map(function(image){
+    return ee.Feature(null, {'date': image.date().format('YYYY-MM-dd'), 'id': image.id()});
+})
+.distinct('date')
+.aggregate_array('date');
+print ('ImageDates', ImageDates);
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+// Statistics of the cloud pixel percentage in the image collection 
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+var CloudCoverageStats = SenImageCollection.aggregate_stats('CLOUDY_PIXEL_PERCENTAGE');
+print('Cloud Coverage stats:', CloudCoverageStats);
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+// Visualization parameters for the calssification legend
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+var class_vis = {min:0, max: 4, 
+palette:['F7B83F', '146E04', '071AC7', 'A0A0A5','AB6106']};
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+// Create RGB visualization images to use as animation frames.
+var rgbVis = SenImageCollection.map(function(image) {
+  return image.visualize(class_vis);
+});  
+// Define GIF visualization parameters.
+var gifParams = {
+  'region': Study_Area,
+  'dimensions': 300,
+  'crs': 'EPSG:32636',
+  'framesPerSecond': 5
+};
+// Render the GIF animation in the console.
+print(ui.Thumbnail(rgbVis, gifParams));
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+// Merged the training samples into one feature collection
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+var training_samples = SandClass_points.merge(VegetationClass_points)
+                      .merge(WaterClass_points)
+                      .merge(UrbanClass_points).merge(RockyClass_points);
+print('training samples dataset', training_samples);
+var testsamples = SandClass_testpoints
+                  .merge(VegetationClass_testpoints)
+                  .merge(WaterClass_testpoints)
+                  .merge(UrbanClass_testpoints)
+                  .merge(RockyClass_testpoints);
+print('test samples dataset', testsamples);                 
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+//Train the Random Forest classifier and classify the image collection 
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+var bands = ['B2', 'B3', 'B4', 'B8'];
+function RFclassification(image){
+  var classification_training_samples = image.select(bands).sampleRegions({collection:training_samples,
+    properties: ['landcover'],
+    scale: 10
+});
+var RFtrained_classifier = ee.Classifier.smileRandomForest(100).train(classification_training_samples, 'landcover', bands);
+var RFclassified_image = image.select(bands).classify(RFtrained_classifier);
+return RFclassified_image;
+}
+var RFclassified_imageCollection = SenImageCollection.map(RFclassification);
+print('RFclassified_imageCollection', RFclassified_imageCollection);
+var RFclassified_imageCollectionlist = RFclassified_imageCollection.toList(RFclassified_imageCollection.size());
+print('RFclassified_imageCollectionlist', RFclassified_imageCollectionlist);
+Map.centerObject(Study_Area, 8);
+Map.addLayer(ee.Image(RFclassified_imageCollectionlist.get(0)), class_vis , 'classification0');
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Calculate the area for each land cover class from all classification images
+// Plot a chart to show the time series for area changes in each class
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+var RFClassareas = RFclassified_imageCollectionlist.map(areaByClass);
+print('RFClassareas', RFClassareas);
+var chart = ui.Chart.feature.byFeature(RFClassareas)
+  .setChartType('LineChart')
+  .setOptions(({
+    hAxis: {
+      title: 'Date', titleTextStyle: {italic: false, bold: true}},
+    vAxis: {
+      title: 'Area of Classification (sq km)', titleTextStyle: {italic: false, bold: true}
+    },
+    colors:['AB6106', 'A0A0A5', '071AC7', 'F7B83F', '146E04']
+    }));
+print(chart);
+// This part of the code (how-to-automate-calculating-area) has been modified after (Daniel Wiell, 2020)
+// https://gis.stackexchange.com/users/154371/daniel-wiell?tab=profile
+// https://code.earthengine.google.com/d20512d31f5d46d5d9302000ce86bc28
+// https://gis.stackexchange.com/questions/361464/google-earth-engine-how-to-automate-calculating-area-for-each-class-for-each-im/361486#361486
+function areaByClass(image) {  
+  var classNames = ee.List(['Sand', 'Vegetation', 'Water', 'Urban', 'Rocky']);
+  var groups = ee.Image.pixelArea().addBands(image)
+    .reduceRegion({ 
+      reducer: ee.Reducer.sum().group({ 
+        groupField: 1, groupName: 'Class_id'}), 
+      geometry: Study_Area, 
+      scale: 10,
+      bestEffort: true}).get('groups');
+  var areaByClass = ee.Dictionary(
+    ee.List(groups).map(function (AreaDic) {
+    var AreaDic = ee.Dictionary(AreaDic)
+      return [
+        classNames.get(AreaDic.getNumber('Class_id')),
+        AreaDic.getNumber('sum').divide(1e6) // square km 
+      ];
+      }).flatten());
+    return ee.Feature(null, areaByClass)
+  }
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Create RGB visualization classification images to use as animation frames
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+var rgbVis2 = RFclassified_imageCollection.map(function(RFclassified_image) {
+  return RFclassified_image.visualize(class_vis);
+});  
+// Define GIF visualization parameters.
+var gifParams2 = {
+  'region': Study_Area,
+  'dimensions': 300,
+  'crs': 'EPSG:32636',
+  'framesPerSecond': 1
+};
+// Print the GIF URL to the console.
+// print(rgbVis2.getVideoThumbURL(gifParams2));
+// Render the GIF animation in the console.
+// print(ui.Thumbnail(rgbVis, gifParams));
+// Define arguments for the getFilmstripThumbURL function parameters.
+var filmArgs = {
+  dimensions: 128,
+  region: Study_Area,
+  crs: 'EPSG:32636'
+  };
+// Print a URL that will produce a filmstrip when accessed.
+// print(rgbVis2.getFilmstripThumbURL(filmArgs));
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//Train the RF classifier using the test samples and RF classified reults for accuracy validation
+// Compute confusion matrix and kappa to assess the accuracy of RF classifier 
+// and validate the classfication results using the test samples
+// This piece of code is written to validate the classified images individually
+// Validation for the RF classified image
+var RFvalidation_test_samples = (ee.Image(RFclassified_imageCollectionlist.get(0))).sampleRegions({collection: testsamples,  properties: ['landcover'],  scale: 10});
+// print('Prior RF valdiation dataset', RFvalidation_test_samples);
+var RFtestaccuracy = RFvalidation_test_samples.errorMatrix('landcover','classification');
+print('RF Validation Error Matrix:', RFtestaccuracy);
+print('RF Validation Overall Accuracy:', RFtestaccuracy.accuracy());
+var RFProducerAccuracy = RFtestaccuracy.producersAccuracy();
+print('RF Producer Accuracy:',RFProducerAccuracy);
+var RFConsumerAccuracy = RFtestaccuracy.consumersAccuracy();
+print('RF Consumer Accuracy:', RFConsumerAccuracy);
+//Export the RF confusion error matrix 
+var RFconfusionmatrix20211231 = ee.Feature(null, {matrix:RFtestaccuracy.array()});
+Export.table.toDrive({
+  collection: ee.FeatureCollection(RFconfusionmatrix20211231),
+  description: 'RFconfusionmatrix20211231',
+  fileFormat: 'CSV'
+});
+// Compute the kappa for RF classification
+var RFkappa = RFtestaccuracy.kappa();
+print('RFkappa', RFkappa);
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Export classification maps
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+Export.image.toDrive({
+  image: ee.Image(RFclassified_imageCollectionlist.get(57)),
+  description: 'ClassifiedImage14072020',
+  folder: 'GEE_Exports',
+  region: Study_Area,
+  scale: 10,
+  maxPixels: 1e12
+});
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+// Export the training samples and test validation datasets 
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+Export.table.toDrive({
+  collection: training_samples,
+  description: 'training_samples',
+  fileFormat: 'shp'
+});
+// Export the test samples and test validation data 
+Export.table.toDrive({
+  collection: testsamples,
+  description: 'testsamples',
+  fileFormat: 'shp'
+});
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Classification using the Support Vector Machine
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+function classification(image){
+  var classification_training_samples = image.select(bands).sampleRegions({collection:training_samples,
+    properties: ['landcover'],
+    scale: 10
+});
+var SVMtrained_classifier = ee.Classifier.libsvm({
+    kernelType: 'LINEAR',
+    gamma: null,
+    cost: 0.2
+}).train(classification_training_samples, 'landcover', bands);
+var SVMclassified_image = image.select(bands).classify(SVMtrained_classifier);
+return SVMclassified_image;
+}
+var SVMclassified_imageCollection = SenImageCollection.map(classification);
+print('SVMclassified_imageCollection', SVMclassified_imageCollection);
+var SVMclassified_imageCollectionlist = SVMclassified_imageCollection.toList(SVMclassified_imageCollection.size());
+print('SVMclassified_imageCollectionlist', SVMclassified_imageCollectionlist);
+Map.centerObject(Study_Area, 8);
+Map.addLayer(ee.Image(SVMclassified_imageCollectionlist.get(17)), class_vis , 'classification17');
+Map.addLayer(ee.Image(SVMclassified_imageCollectionlist.get(49)), class_vis , 'classification49');
+Map.addLayer(ee.Image(SVMclassified_imageCollectionlist.get(91)), class_vis , 'classification91');
+Map.addLayer(ee.Image(SVMclassified_imageCollectionlist.get(11)), class_vis , 'classification11');
+Map.addLayer(ee.Image(SVMclassified_imageCollectionlist.get(18)), class_vis , 'classification18');
+Map.addLayer(ee.Image(SVMclassified_imageCollectionlist.get(40)), class_vis , 'classification40');
+Map.addLayer(ee.Image(SVMclassified_imageCollectionlist.get(46)), class_vis , 'classification46');
+Map.addLayer(ee.Image(SVMclassified_imageCollectionlist.get(60)), class_vis , 'classification60');
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Calculate the area for each land cover class from all classification images
+// The output here is a list table that contains the areas sum for each class from all the classification images
+// In addition to a line chart that shows the changes over time
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+function classAreaSum(SVMclassified_image){
+var imagecalssesarea = ee.Image.pixelArea().addBands(SVMclassified_image).reduceRegion({
+  reducer:ee.Reducer.sum().group({
+    groupField:1,
+    groupName:'Class_id'}),
+    geometry: Study_Area,
+    scale: 10,
+    bestEffort: true});
+  return imagecalssesarea;
+}
+var Areaclassified_imagelist = SVMclassified_imageCollectionlist.map(classAreaSum);
+print('Area Table in sq.m', Areaclassified_imagelist);
+// Plot a chart to show the time series of area changes in each class
+var Classareas = SVMclassified_imageCollectionlist.map(areaByClass);
+print('Classareas', Classareas);
+var chart = ui.Chart.feature.byFeature(Classareas)
+  .setChartType('LineChart')
+  .setOptions(({
+    hAxis: {
+      title: 'Date', titleTextStyle: {italic: false, bold: true}},
+    vAxis: {
+      title: 'Area of Classification (sq km)', titleTextStyle: {italic: false, bold: true}
+    },
+    colors:['AB6106', 'A0A0A5', '071AC7', 'F7B83F', '146E04']
+    }));
+print(chart);
+function areaByClass(image) {  
+  var classNames = ee.List(['Sand', 'Vegetation', 'Water', 'Urban', 'Rocky']);
+  var groups = ee.Image.pixelArea().addBands(image)
+    .reduceRegion({ 
+      reducer: ee.Reducer.sum().group({ 
+        groupField: 1, groupName: 'Class_id'}), 
+      geometry: Study_Area, 
+      scale: 10,
+      bestEffort: true}).get('groups');
+  var areaByClass = ee.Dictionary(
+    ee.List(groups).map(function (AreaDic) {
+    var AreaDic = ee.Dictionary(AreaDic)
+      return [
+        classNames.get(AreaDic.getNumber('Class_id')),
+        AreaDic.getNumber('sum').divide(1e6) // square km 
+      ];
+      }).flatten());
+    return ee.Feature(null, areaByClass)
+  }
+Export.table.toDrive({
+  collection: Classareas,
+  description: 'Classareas',
+  fileFormat: 'CSV'
+});
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Create RGB visualization images to use as animation frames
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+var rgbVis = SVMclassified_imageCollection.map(function(SVMclassified_image) {
+  return SVMclassified_image.visualize(class_vis);
+});  
+// Define GIF visualization parameters.
+var gifParams = {
+  'region': Study_Area,
+  'dimensions': 300,
+  'crs': 'EPSG:32636',
+  'framesPerSecond': 1
+};
+// Print the GIF URL to the console.
+print(rgbVis.getVideoThumbURL(gifParams));
+// Render the GIF animation in the console.
+print(ui.Thumbnail(rgbVis, gifParams));
+// Define arguments for the getFilmstripThumbURL function parameters.
+var filmArgs = {
+  dimensions: 128,
+  region: Study_Area,
+  crs: 'EPSG:32636'
+  };
+// Print a URL that will produce the filmstrip when accessed.
+print(rgbVis.getFilmstripThumbURL(filmArgs));
+
+// Export.table.toDrive({
+//   collection: AreasSumClassified,
+//   description: 'AreasSumClassified',
+//   fileFormat: 'CSV'
+// });
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Compute confusion matrix and kappa coefficient to assess the accuracy of SVM classifier 
+// and validate the SVM classification results using test samples
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Validation for the RF classified image
+var SVMvalidation_test_samples = (ee.Image(SVMclassified_imageCollectionlist.get(0))).sampleRegions({collection: testsamples,  properties: ['landcover'],  scale: 10});
+// print('Prior SVM valdiation dataset', SVMvalidation_test_samples);
+var SVMtestaccuracy = SVMvalidation_test_samples.errorMatrix('landcover','classification');
+print('SVM Validation Error Matrix:', SVMtestaccuracy);
+print('SVM Validation Overall Accuracy:', SVMtestaccuracy.accuracy());
+var SVMProducerAccuracy = SVMtestaccuracy.producersAccuracy();
+print('SVM Producer Accuracy:',SVMProducerAccuracy);
+var SVMConsumerAccuracy = SVMtestaccuracy.consumersAccuracy();
+print('SVM Consumer Accuracy:', SVMConsumerAccuracy);
+//Export the SVM confusion error matrix 
+var SVMconfusionmatrix20211231 = ee.Feature(null, {matrix:SVMtestaccuracy.array()});
+Export.table.toDrive({
+  collection: ee.FeatureCollection(SVMconfusionmatrix20211231),
+  description: 'SVMconfusionmatrix20211231',
+  fileFormat: 'CSV'
+});
+// Compute the kappa for the SVM classification
+var SVMkappa = SVMtestaccuracy.kappa();
+print('SVMkappa', SVMkappa);
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Calculate image differencing between two dates
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+var image1 = (ee.Image(listOfimages.get(19)).select(['B8']));
+var image2 = (ee.Image(listOfimages.get(38)).select(['B8']));
+var imageDiff = image1.subtract(image2);
+print('imageDiff', imageDiff);
+Map.addLayer(imageDiff, {min: 0, max: 3000});
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Export SVM classification maps
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+Export.image.toDrive({
+  image: ee.Image(SVMclassified_imageCollectionlist.get(93)),
+  description: 'SVMClassifiedImage10052021',
+  folder: 'GEE_Exports',
+  region: Study_Area,
+  scale: 10,
+  maxPixels: 1e12
+});
+// ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// // Export image differencing maps
+// ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+Export.image.toDrive({
+  image: imageDiff,
+  description: 'ImageDiff10072019_15022019',
+  folder: 'GEE_Exports',
+  region: Study_Area,
+  scale: 10,
+  maxPixels: 1e12
+});
+/////////////////////////////////////////////////////////////////////////////////////////////
+// // Export an image from the image collection
+// //////////////////////////////////////////////////////////////////////////////////////////
+Export.image.toDrive({
+  image: (ee.Image(listOfimages.get(56)).select(['B8','B4','B3','B2'])),
+  description: 'Image09072020',
+  folder: 'GEE_Exports',
+  region: Study_Area,
+  scale: 10,
+  maxPixels: 1e12
+});
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Create RGB visualization for the image collection 
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+var rgbVis3 = SenImageCollection.map(function(image){
+    return image.visualize(class_vis);
+});  
+// Define GIF visualization parameters.
+var gifParams3 = {
+  'region': Study_Area,
+  'dimensions': 300,
+  'crs': 'EPSG:32636',
+  'framesPerSecond': 1
+};
+// Print the GIF URL to the console.
+// print(rgbVis3.getVideoThumbURL(gifParams3));
+// Render the GIF animation in the console.
+print(ui.Thumbnail(rgbVis3, gifParams3));
+// Define arguments for the getFilmstripThumbURL function parameters.
+var filmArgs = {
+  dimensions: 128,
+  region: Study_Area,
+  crs: 'EPSG:32636'
+  };
+// // Print a URL that will produce the filmstrip when accessed.
+// print(rgbVis3.getFilmstripThumbURL(filmArgs));
