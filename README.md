@@ -5,10 +5,12 @@ Sand Encroachment Tool (SET) is developed with JavaScript in Google Earth Engine
 
 ![image](https://github.com/AhmedMAMahmoud/sand-encroachment-tool/assets/104382320/655586eb-2129-4379-9c98-f1e4fde6b6ec)
 
+# SET Processing framework implemented in ArcGIS for sand dune monitoring
+
+![S1Figure](https://github.com/AhmedMAMahmoud/sand-encroachment-tool/assets/104382320/25f935fc-8dc5-42e8-b5d3-51dec825a68e)
+
 # SET Processing framework implemented in GEE for sand dune monitoring
 
 ![image](https://github.com/AhmedMAMahmoud/sand-encroachment-tool/assets/104382320/3dddd1b4-74ca-4aa8-91d8-8470dc6eafa8)
 
-# SET Processing framework implemented in ArcGIS for sand dune monitoring
 
-![S1Figure](https://github.com/AhmedMAMahmoud/sand-encroachment-tool/assets/104382320/25f935fc-8dc5-42e8-b5d3-51dec825a68e)
